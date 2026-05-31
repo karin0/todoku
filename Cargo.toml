@@ -1,0 +1,18 @@
+[package]
+name = "todoku"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rusqlite = "0.40"
+ureq = { version = "3", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+
+[features]
+default = []
+tls = ["ureq/rustls"]
