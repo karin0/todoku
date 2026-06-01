@@ -118,9 +118,14 @@ impl Bot {
             #[serde(skip_serializing_if = "Option::is_none")]
             offset: Option<i64>,
             timeout: i64,
+            allowed_updates: &'static [&'static str],
         }
 
-        let body = GetUpdates { offset, timeout };
+        let body = GetUpdates {
+            offset,
+            timeout,
+            allowed_updates: &["message"],
+        };
         self.request("getUpdates", &body)
     }
 
@@ -143,23 +148,20 @@ impl Bot {
             text: &'a str,
             #[serde(skip_serializing_if = "Option::is_none")]
             parse_mode: Option<&'a str>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            disable_web_page_preview: Option<bool>,
+            disable_web_page_preview: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             reply_parameters: Option<ReplyParameters>,
         }
-
-        let reply_parameters = reply_to_message_id.map(|id| ReplyParameters {
-            message_id: id,
-            allow_sending_without_reply: true,
-        });
 
         let body = SendMessage {
             chat_id,
             text,
             parse_mode,
-            disable_web_page_preview: Some(true),
-            reply_parameters,
+            disable_web_page_preview: true,
+            reply_parameters: reply_to_message_id.map(|message_id| ReplyParameters {
+                message_id,
+                allow_sending_without_reply: true,
+            }),
         };
         self.request("sendMessage", &body)
     }

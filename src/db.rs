@@ -40,6 +40,12 @@ pub fn get_todos(conn: &Connection) -> Result<Vec<(i64, String, i64)>> {
         .collect()
 }
 
+pub fn stat(conn: &Connection) -> Result<(i64, i64)> {
+    let total_todo = conn.query_one("SELECT COUNT(*) FROM Todo;", [], |row| row.get(0))?;
+    let total_done = conn.query_one("SELECT COUNT(*) FROM Done;", [], |row| row.get(0))?;
+    Ok((total_todo, total_done))
+}
+
 pub fn get_todo(conn: &Connection, task_id: i64) -> Result<Option<String>> {
     conn.query_one("SELECT text FROM Todo WHERE id = ?1;", [task_id], |row| {
         row.get(0)

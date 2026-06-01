@@ -3,18 +3,12 @@ mod db;
 
 use anyhow::{Result, anyhow};
 use bot::{Bot, BotCommand, BotCommandScope, Update};
+use html_escape::encode_text;
 use rusqlite::Connection;
 use std::env;
 use std::fmt::Write;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-
-fn escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
 
 struct App {
     conn: Connection,
@@ -32,14 +26,14 @@ impl App {
         if todos.is_empty() {
             text.push_str("All tasks completed! 🎉");
         } else {
-            for (id, task, date) in &todos {
+            for (id, task, date) in todos {
                 writeln!(
                     text,
                     "<a href=\"https://t.me/{}?start=done_{id}\">• [{id}] {}\t\t</a> \
                     (<tg-time unix=\"{date}\" format=\"dT\">{date}</tg-time>, \
                     <tg-time unix=\"{date}\" format=\"r\">{date}</tg-time>)",
                     self.username,
-                    escape(task)
+                    encode_text(&task),
                 )?;
             }
         }
@@ -112,8 +106,10 @@ impl App {
         let chat_id = message.chat.id;
         if chat_id != self.chat_id {
             eprintln!("Unauthorized update from {chat_id}:\n{update:#?}");
-            let debug_text = format!("{update:#?}");
-            let text = format!("Unauthorized update:\n<pre>{}</pre>", escape(&debug_text));
+            let text = format!(
+                "Unauthorized update:\n<pre>{}</pre>",
+                encode_text(&format!("{update:#?}"))
+            );
             self.bot
                 .send_message(self.chat_id, &text, Some("HTML"), None)?;
             return Ok(());
@@ -161,39 +157,76 @@ impl App {
         }
 
         self.refresh_panel(reply_to)?;
-        self.bot.delete_message(self.chat_id, message.id)?;
+        self.bot.delete_message(chat_id, message.id)?;
         Ok(())
     }
 
-    fn init(&self) -> Result<Option<i64>> {
-        let offset;
-        let discarded;
+    fn new() -> Result<Self> {
+        let bot = {
+            let token = env::var("TELEGRAM_BOT_TOKEN")?;
+            let base_url = env::var("TELEGRAM_API_BASE_URL");
+            let base_url = base_url.as_deref().unwrap_or("https://api.telegram.org");
+            Bot::new(&token, base_url)
+        };
+        let chat_id: i64 = env::var("ALLOWED_CHAT_ID")?.parse()?;
 
-        if let Ok(updates) = self.bot.get_updates(Some(-1), 0)
-            && let Some(last) = updates.last()
-        {
+        // Fetch bot username for deep linking
+        let username = bot
+            .get_me()?
+            .username
+            .ok_or_else(|| anyhow!("No username"))?;
+
+        let db_path = env::var("DB_PATH");
+        let db_path = db_path.as_deref().unwrap_or("todo.db");
+        let conn = Connection::open(db_path)?;
+        db::init_db(&conn)?;
+
+        // Register commands for the allowed chat
+        bot.set_commands(
+            &[
+                BotCommand {
+                    command: "start",
+                    description: "Start!",
+                },
+                BotCommand {
+                    command: "help",
+                    description: "Show usage",
+                },
+            ],
+            Some(&BotCommandScope::Chat { chat_id }),
+        )?;
+
+        Ok(Self {
+            conn,
+            bot,
+            chat_id,
+            username,
+        })
+    }
+
+    fn init(&self) -> Result<Option<i64>> {
+        let updates = self.bot.get_updates(Some(-1), 0)?;
+        let username = &self.username;
+        let (total_todo, total_done) = db::stat(&self.conn)?;
+
+        let offset;
+        let info = if let Some(last) = updates.last() {
             let last_id: i64 = last.update_id;
-            discarded = updates.len();
+            let discarded = updates.len();
             for update in updates {
                 eprintln!("Discarded update: {update:#?}");
             }
             offset = Some(last_id + 1);
-            println!("Discarded accumulated updates up to id {last_id}");
-        } else {
-            discarded = 0;
-            offset = None;
-        }
-
-        let text = if discarded > 0 {
             format!(
-                "{} initialized! Discarded {discarded} updates.",
-                self.username
+                "@{username} initialized: {total_todo} tasks, {total_done} done, {discarded} discarded, update_id={last_id}"
             )
         } else {
-            format!("{} initialized!", self.username)
+            offset = None;
+            format!("@{username} initialized: {total_todo} tasks, {total_done} done")
         };
 
-        let msg = self.bot.send_message(self.chat_id, &text, None, None)?;
+        println!("{info}");
+        let msg = self.bot.send_message(self.chat_id, &info, None, None)?;
         self.refresh_panel(Some(msg.id))?;
         Ok(offset)
     }
@@ -225,11 +258,11 @@ fn shutdown_all() {
     }
 }
 
+static RUNNING: AtomicBool = AtomicBool::new(true);
+
 fn main() -> Result<()> {
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
     ctrlc::set_handler(move || {
-        if !r.swap(false, Ordering::Relaxed) {
+        if !RUNNING.swap(false, Ordering::Relaxed) {
             eprintln!("Exiting...");
             std::process::exit(1);
         }
@@ -238,65 +271,27 @@ fn main() -> Result<()> {
         shutdown_all();
     })?;
 
-    let token = env::var("TELEGRAM_BOT_TOKEN")?;
-    let chat_id: i64 = env::var("ALLOWED_CHAT_ID")?.parse()?;
-    let conn = Connection::open("todo.db")?;
-    db::init_db(&conn)?;
-
-    let bot = {
-        let api_base = env::var("TELEGRAM_API_BASE_URL")
-            .unwrap_or_else(|_| "https://api.telegram.org".to_string());
-
-        Bot::new(&token, &api_base)
-    };
-
-    // Fetch bot username for deep linking
-    let username = bot
-        .get_me()?
-        .username
-        .ok_or_else(|| anyhow!("No username"))?;
-    println!("Bot initialized: @{username}");
-
-    // Register commands with Telegram (scoped specifically to the allowed chat)
-    bot.set_commands(
-        &[
-            BotCommand {
-                command: "start",
-                description: "Start!",
-            },
-            BotCommand {
-                command: "help",
-                description: "Show usage",
-            },
-        ],
-        Some(&BotCommandScope::Chat { chat_id }),
-    )?;
-
-    let app = App {
-        conn,
-        bot,
-        chat_id,
-        username,
-    };
-
+    let app = App::new()?;
     let mut offset = app.init()?;
     let mut retry_delay = Duration::from_secs(2);
     let max_delay = Duration::from_mins(5);
 
-    while running.load(Ordering::Relaxed) {
+    while RUNNING.load(Ordering::Relaxed) {
         match app.bot.get_updates(offset, 30) {
             Ok(updates) => {
                 retry_delay = Duration::from_secs(2);
-                for update in updates {
-                    offset = Some(update.update_id + 1);
-                    if let Err(e) = app.handle_update(&update) {
-                        eprintln!("Error handling update: {e}");
+                if let Some(last) = updates.last() {
+                    offset = Some(last.update_id + 1);
+                    for update in updates {
+                        if let Err(e) = app.handle_update(&update) {
+                            eprintln!("Error handling update: {update:#?}: {e}");
+                        }
                     }
                 }
             }
             Err(e) => {
                 eprintln!("Error during polling: {e}. Retrying in {retry_delay:?}...");
-                if !running.load(Ordering::Relaxed) {
+                if !RUNNING.load(Ordering::Relaxed) {
                     break;
                 }
                 std::thread::sleep(retry_delay);
