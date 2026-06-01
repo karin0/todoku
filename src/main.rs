@@ -246,8 +246,10 @@ fn shutdown_all() {
             for entry in entries.flatten() {
                 if let Some(fd_str) = entry.file_name().to_str()
                     && let Ok(fd) = fd_str.parse::<RawFd>()
+                    && fd > 2
                     && unsafe { shutdown(fd, 2) } == 0
                 {
+                    // Skip stdio to avoid breaking systemd journal sockets
                     println!("Shutdown fd: {fd}");
                 }
             }
@@ -263,10 +265,10 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 fn main() -> Result<()> {
     ctrlc::set_handler(move || {
         if !RUNNING.swap(false, Ordering::Relaxed) {
-            eprintln!("Exiting...");
+            eprintln!("Aborting.");
             std::process::exit(1);
         }
-        eprintln!("Exiting gracefully...");
+        eprintln!("Exiting...");
         #[cfg(unix)]
         shutdown_all();
     })?;
