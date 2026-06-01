@@ -1,6 +1,7 @@
 mod bot;
 mod db;
 
+use anyhow::{Result, anyhow};
 use bot::{Bot, Update};
 use rusqlite::Connection;
 use std::env;
@@ -24,7 +25,7 @@ impl App {
     fn refresh_panel(
         &self,
         #[allow(unused_variables)] reply_to_message_id: Option<i64>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<()> {
         let todos = db::get_todos(&self.conn)?;
 
         // Build list with deep links
@@ -85,7 +86,7 @@ impl App {
         Ok(())
     }
 
-    fn handle_update(&self, update: &Update) -> Result<(), Box<dyn std::error::Error>> {
+    fn handle_update(&self, update: &Update) -> Result<()> {
         let Some(message) = &update.message else {
             return Ok(());
         };
@@ -152,7 +153,7 @@ impl App {
         Ok(())
     }
 
-    fn init(&self) -> Result<Option<i64>, Box<dyn std::error::Error>> {
+    fn init(&self) -> Result<Option<i64>> {
         let offset;
         let discarded;
 
@@ -186,7 +187,7 @@ impl App {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
     let token = env::var("TELEGRAM_BOT_TOKEN")?;
     let chat_id: i64 = env::var("ALLOWED_CHAT_ID")?.parse()?;
     let conn = Connection::open("todo.db")?;
@@ -200,7 +201,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Fetch bot username for deep linking
     let me = bot.get_me()?;
-    let username = me.username.ok_or("Bot does not have a username set")?;
+    let username = me
+        .username
+        .ok_or_else(|| anyhow!("Bot does not have a username set"))?;
     println!("Bot initialized as @{username}");
 
     let app = App {

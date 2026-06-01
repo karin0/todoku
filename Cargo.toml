@@ -7,6 +7,7 @@ edition = "2024"
 rusqlite = "0.40"
 ureq = { version = "3", default-features = false, features = ["json"] }
 serde = { version = "1", features = ["derive"] }
+anyhow = { version = "1", features = ["backtrace"] }
 
 [profile.release]
 strip = true

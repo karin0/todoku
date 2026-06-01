@@ -1,3 +1,4 @@
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Clone)]
@@ -52,7 +53,7 @@ impl Bot {
         &self,
         method: &str,
         body: &S,
-    ) -> Result<R, Box<dyn std::error::Error>> {
+    ) -> Result<R> {
         let url = format!("{}/{}", self.api_url, method);
         let mut response = self.client.post(&url).send_json(body)?;
 
@@ -62,25 +63,21 @@ impl Bot {
             if let Some(res) = api_resp.result {
                 Ok(res)
             } else {
-                Err("API ok but missing result".into())
+                Err(anyhow!("API ok but missing result"))
             }
         } else {
             let desc = api_resp
                 .description
                 .unwrap_or_else(|| "Unknown API error".to_string());
-            Err(desc.into())
+            Err(anyhow!(desc))
         }
     }
 
-    pub fn get_me(&self) -> Result<User, Box<dyn std::error::Error>> {
+    pub fn get_me(&self) -> Result<User> {
         self.request("getMe", &())
     }
 
-    pub fn get_updates(
-        &self,
-        offset: Option<i64>,
-        timeout: i64,
-    ) -> Result<Vec<Update>, Box<dyn std::error::Error>> {
+    pub fn get_updates(&self, offset: Option<i64>, timeout: i64) -> Result<Vec<Update>> {
         #[derive(Serialize)]
         struct GetUpdates {
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -98,7 +95,7 @@ impl Bot {
         text: &str,
         parse_mode: Option<&str>,
         reply_to_message_id: Option<i64>,
-    ) -> Result<Message, Box<dyn std::error::Error>> {
+    ) -> Result<Message> {
         #[derive(Serialize)]
         struct ReplyParameters {
             message_id: i64,
@@ -139,7 +136,7 @@ impl Bot {
         message_id: i64,
         text: &str,
         parse_mode: Option<&str>,
-    ) -> Result<Message, Box<dyn std::error::Error>> {
+    ) -> Result<Message> {
         #[derive(Serialize)]
         struct EditMessageText<'a> {
             chat_id: i64,
@@ -161,11 +158,7 @@ impl Bot {
         self.request("editMessageText", &body)
     }
 
-    pub fn delete_message(
-        &self,
-        chat_id: i64,
-        message_id: i64,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<()> {
         #[derive(Serialize)]
         struct DeleteMessage {
             chat_id: i64,
@@ -180,7 +173,7 @@ impl Bot {
         if result {
             Ok(())
         } else {
-            Err("Unexpected `false` from deleteMessage".into())
+            Err(anyhow!("Unexpected `false` from deleteMessage"))
         }
     }
 }
