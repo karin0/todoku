@@ -6,6 +6,8 @@ use bot::{Bot, Update};
 use rusqlite::Connection;
 use std::env;
 use std::fmt::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn escape(s: &str) -> String {
@@ -190,6 +192,24 @@ impl App {
 }
 
 fn main() -> Result<()> {
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    let active_stream = Arc::new(Mutex::new(None::<std::net::TcpStream>));
+    let active_stream_handler = active_stream.clone();
+    ctrlc::set_handler(move || {
+        if !r.swap(false, Ordering::Relaxed) {
+            eprintln!("Exiting...");
+            std::process::exit(1);
+        }
+        eprintln!("Exiting gracefully...");
+        let mut guard = active_stream_handler.lock().unwrap();
+        if let Some(stream) = guard.take()
+            && let Err(e) = stream.shutdown(std::net::Shutdown::Both)
+        {
+            eprintln!("Failed to shutdown stream: {e}");
+        }
+    })?;
+
     let token = env::var("TELEGRAM_BOT_TOKEN")?;
     let chat_id: i64 = env::var("ALLOWED_CHAT_ID")?.parse()?;
     let conn = Connection::open("todo.db")?;
@@ -198,7 +218,7 @@ fn main() -> Result<()> {
     let api_base = env::var("TELEGRAM_API_BASE_URL")
         .unwrap_or_else(|_| "https://api.telegram.org".to_string());
 
-    let bot = Bot::new(&token, &api_base);
+    let bot = Bot::new(&token, &api_base, active_stream);
     drop(api_base);
 
     // Fetch bot username for deep linking
@@ -219,7 +239,7 @@ fn main() -> Result<()> {
     let mut retry_delay = Duration::from_secs(2);
     let max_delay = Duration::from_mins(5);
 
-    loop {
+    while running.load(Ordering::Relaxed) {
         match app.bot.get_updates(offset, 30) {
             Ok(updates) => {
                 retry_delay = Duration::from_secs(2);
@@ -232,9 +252,14 @@ fn main() -> Result<()> {
             }
             Err(e) => {
                 eprintln!("Error during polling: {e}. Retrying in {retry_delay:?}...");
+                if !running.load(Ordering::Relaxed) {
+                    break;
+                }
                 std::thread::sleep(retry_delay);
                 retry_delay = max_delay.min(retry_delay * 2);
             }
         }
     }
+    println!("Shutting down.");
+    Ok(())
 }
