@@ -30,6 +30,10 @@ pub fn add_todo(conn: &Connection, text: &str, created_at: i64) -> Result<()> {
     Ok(())
 }
 
+pub fn has_todos(conn: &Connection) -> Result<bool> {
+    conn.query_one("SELECT EXISTS (SELECT 1 FROM Todo);", [], |row| row.get(0))
+}
+
 pub fn get_todos(conn: &Connection) -> Result<Vec<(i64, String, i64)>> {
     let mut stmt = conn.prepare("SELECT id, text, created_at FROM Todo ORDER BY id;")?;
     stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
@@ -37,7 +41,7 @@ pub fn get_todos(conn: &Connection) -> Result<Vec<(i64, String, i64)>> {
 }
 
 pub fn get_todo(conn: &Connection, task_id: i64) -> Result<Option<String>> {
-    conn.query_row("SELECT text FROM Todo WHERE id = ?1;", [task_id], |row| {
+    conn.query_one("SELECT text FROM Todo WHERE id = ?1;", [task_id], |row| {
         row.get(0)
     })
     .optional()
@@ -46,7 +50,7 @@ pub fn get_todo(conn: &Connection, task_id: i64) -> Result<Option<String>> {
 pub fn delete_todo(conn: &Connection, task_id: i64, done_at: i64) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
 
-    let (text, created_at): (String, i64) = tx.query_row(
+    let (text, created_at): (String, i64) = tx.query_one(
         "SELECT text, created_at FROM Todo WHERE id = ?1;",
         [task_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
@@ -62,7 +66,7 @@ pub fn delete_todo(conn: &Connection, task_id: i64, done_at: i64) -> Result<()> 
 }
 
 pub fn get_panel_id(conn: &Connection) -> Result<Option<i64>> {
-    conn.query_row("SELECT message_id FROM Panel WHERE id = 1;", [], |row| {
+    conn.query_one("SELECT message_id FROM Panel WHERE id = 1;", [], |row| {
         row.get(0)
     })
     .optional()

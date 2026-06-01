@@ -12,6 +12,19 @@ use ureq::unversioned::transport::{
 #[cfg(feature = "tls")]
 use ureq::unversioned::transport::RustlsConnector;
 
+#[derive(Debug, Serialize, Clone)]
+pub struct BotCommand<'a> {
+    pub command: &'a str,
+    pub description: &'a str,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "type")]
+pub enum BotCommandScope {
+    #[serde(rename = "chat")]
+    Chat { chat_id: i64 },
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct User {
     pub username: Option<String>,
@@ -100,6 +113,26 @@ impl Bot {
         self.request("getMe", &())
     }
 
+    pub fn set_commands(
+        &self,
+        commands: &[BotCommand<'_>],
+        scope: Option<&BotCommandScope>,
+    ) -> Result<()> {
+        #[derive(Serialize)]
+        struct SetMyCommands<'a> {
+            commands: &'a [BotCommand<'a>],
+            #[serde(skip_serializing_if = "Option::is_none")]
+            scope: Option<&'a BotCommandScope>,
+        }
+
+        let body = SetMyCommands { commands, scope };
+        if self.request("setMyCommands", &body)? {
+            Ok(())
+        } else {
+            Err(anyhow!("Unexpected `false` from setMyCommands"))
+        }
+    }
+
     pub fn get_updates(&self, offset: Option<i64>, timeout: i64) -> Result<Vec<Update>> {
         #[derive(Serialize)]
         struct GetUpdates {
@@ -152,7 +185,6 @@ impl Bot {
         self.request("sendMessage", &body)
     }
 
-    #[cfg(feature = "edit_mode")]
     pub fn edit_message_text(
         &self,
         chat_id: i64,

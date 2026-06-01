@@ -16,6 +16,5 @@ lto = true
 codegen-units = 1
 
 [features]
-default = ["tls", "edit_mode"]
+default = ["tls"]
 tls = ["ureq/rustls"]
-edit_mode = []
