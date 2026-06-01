@@ -1,17 +1,6 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use std::net::TcpStream;
-use std::sync::{Arc, Mutex};
-use std::{fmt, io};
-use ureq::unversioned::resolver::DefaultResolver;
-use ureq::unversioned::transport::{
-    Buffers, ConnectionDetails, Connector, Either, LazyBuffers, NextTimeout, Transport,
-};
-
-#[cfg(feature = "tls")]
-use ureq::unversioned::transport::RustlsConnector;
-
 #[derive(Debug, Serialize, Clone)]
 pub struct BotCommand<'a> {
     pub command: &'a str,
@@ -63,24 +52,14 @@ pub struct Bot {
 }
 
 impl Bot {
-    pub fn new(token: &str, base_url: &str, active_stream: Arc<Mutex<Option<TcpStream>>>) -> Self {
+    pub fn new(token: &str, base_url: &str) -> Self {
         let base_url = base_url.trim_end_matches('/');
         let api_url = format!("{base_url}/bot{token}");
         let config = ureq::config::Config::builder()
             .timeout_global(Some(std::time::Duration::from_secs(45)))
             .http_status_as_error(false)
             .build();
-
-        let tcp_connector = InterruptibleTcpConnector::new(active_stream);
-
-        #[cfg(feature = "tls")]
-        let connector = ().chain(tcp_connector).chain(RustlsConnector::default());
-
-        #[cfg(not(feature = "tls"))]
-        let connector = ().chain(tcp_connector);
-
-        let resolver = DefaultResolver::default();
-        let client = ureq::Agent::with_parts(config, connector, resolver);
+        let client = ureq::Agent::new_with_config(config);
 
         Self { api_url, client }
     }
@@ -230,129 +209,5 @@ impl Bot {
         } else {
             Err(anyhow!("Unexpected `false` from deleteMessage"))
         }
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct InterruptibleTcpConnector {
-    active_stream: Arc<Mutex<Option<TcpStream>>>,
-}
-
-impl fmt::Debug for InterruptibleTcpConnector {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("InterruptibleTcpConnector").finish()
-    }
-}
-
-impl InterruptibleTcpConnector {
-    pub fn new(active_stream: Arc<Mutex<Option<TcpStream>>>) -> Self {
-        Self { active_stream }
-    }
-}
-
-impl<In: Transport> Connector<In> for InterruptibleTcpConnector {
-    type Out = Either<In, InterruptibleTcpTransport>;
-
-    fn connect(
-        &self,
-        details: &ConnectionDetails,
-        chained: Option<In>,
-    ) -> Result<Option<Self::Out>, ureq::Error> {
-        if let Some(transport) = chained {
-            return Ok(Some(Either::A(transport)));
-        }
-
-        let mut last_err = None;
-        let mut stream = None;
-
-        for addr in &details.addrs {
-            let conn_res = if let Some(dur) = details.timeout.not_zero() {
-                TcpStream::connect_timeout(addr, *dur)
-            } else {
-                TcpStream::connect(addr)
-            };
-
-            match conn_res {
-                Ok(s) => {
-                    stream = Some(s);
-                    break;
-                }
-                Err(e) => last_err = Some(e),
-            }
-        }
-
-        let Some(stream) = stream else {
-            let err = last_err.unwrap_or_else(|| {
-                io::Error::new(io::ErrorKind::AddrNotAvailable, "no addresses resolved")
-            });
-            return Err(ureq::Error::Io(err));
-        };
-
-        if details.config.no_delay() {
-            stream.set_nodelay(true).map_err(ureq::Error::Io)?;
-        }
-
-        let clone = stream.try_clone().map_err(ureq::Error::Io)?;
-        *self.active_stream.lock().unwrap() = Some(clone);
-
-        let buffers = LazyBuffers::new(
-            details.config.input_buffer_size(),
-            details.config.output_buffer_size(),
-        );
-        Ok(Some(Either::B(InterruptibleTcpTransport::new(
-            stream, buffers,
-        ))))
-    }
-}
-
-#[derive(Debug)]
-pub struct InterruptibleTcpTransport {
-    stream: TcpStream,
-    buffers: LazyBuffers,
-}
-
-impl InterruptibleTcpTransport {
-    pub fn new(stream: TcpStream, buffers: LazyBuffers) -> Self {
-        Self { stream, buffers }
-    }
-}
-
-impl Transport for InterruptibleTcpTransport {
-    fn buffers(&mut self) -> &mut dyn Buffers {
-        &mut self.buffers
-    }
-
-    fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), ureq::Error> {
-        self.stream
-            .set_write_timeout(timeout.not_zero().map(|d| *d))
-            .map_err(ureq::Error::Io)?;
-        let output = &self.buffers.output()[..amount];
-        io::Write::write_all(&mut self.stream, output).map_err(|e| {
-            if e.kind() == io::ErrorKind::TimedOut {
-                ureq::Error::Timeout(timeout.reason)
-            } else {
-                ureq::Error::Io(e)
-            }
-        })
-    }
-
-    fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
-        self.stream
-            .set_read_timeout(timeout.not_zero().map(|d| *d))
-            .map_err(ureq::Error::Io)?;
-        let input = self.buffers.input_append_buf();
-        let amount = io::Read::read(&mut self.stream, input).map_err(|e| {
-            if e.kind() == io::ErrorKind::TimedOut {
-                ureq::Error::Timeout(timeout.reason)
-            } else {
-                ureq::Error::Io(e)
-            }
-        })?;
-        self.buffers.input_appended(amount);
-        Ok(amount > 0)
-    }
-
-    fn is_open(&mut self) -> bool {
-        self.stream.peer_addr().is_ok()
     }
 }

@@ -6,8 +6,8 @@ use bot::{Bot, BotCommand, BotCommandScope, Update};
 use rusqlite::Connection;
 use std::env;
 use std::fmt::Write;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn escape(s: &str) -> String {
@@ -199,23 +199,43 @@ impl App {
     }
 }
 
+#[cfg(unix)]
+fn shutdown_all() {
+    use std::fs;
+    use std::os::{fd::RawFd, raw::c_int};
+
+    unsafe extern "C" {
+        fn shutdown(socket: RawFd, how: c_int) -> c_int;
+    }
+
+    match fs::read_dir("/proc/self/fd") {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                if let Some(fd_str) = entry.file_name().to_str()
+                    && let Ok(fd) = fd_str.parse::<RawFd>()
+                    && unsafe { shutdown(fd, 2) } == 0
+                {
+                    println!("Shutdown fd: {fd}");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to read procfs: {e}");
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
-    let active_stream = Arc::new(Mutex::new(None::<std::net::TcpStream>));
-    let active_stream_handler = active_stream.clone();
     ctrlc::set_handler(move || {
         if !r.swap(false, Ordering::Relaxed) {
             eprintln!("Exiting...");
             std::process::exit(1);
         }
         eprintln!("Exiting gracefully...");
-        let mut guard = active_stream_handler.lock().unwrap();
-        if let Some(stream) = guard.take()
-            && let Err(e) = stream.shutdown(std::net::Shutdown::Both)
-        {
-            eprintln!("Failed to shutdown stream: {e}");
-        }
+        #[cfg(unix)]
+        shutdown_all();
     })?;
 
     let token = env::var("TELEGRAM_BOT_TOKEN")?;
@@ -227,7 +247,7 @@ fn main() -> Result<()> {
         let api_base = env::var("TELEGRAM_API_BASE_URL")
             .unwrap_or_else(|_| "https://api.telegram.org".to_string());
 
-        Bot::new(&token, &api_base, active_stream)
+        Bot::new(&token, &api_base)
     };
 
     // Fetch bot username for deep linking
