@@ -17,6 +17,7 @@ pub struct Message {
     pub id: i64,
     pub chat: Chat,
     pub text: Option<String>,
+    pub date: i64,
 }
 
 #[derive(Debug, Deserialize, Clone)]

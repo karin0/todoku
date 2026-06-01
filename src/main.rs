@@ -33,12 +33,14 @@ impl App {
         if todos.is_empty() {
             text.push_str("All tasks completed! 🎉");
         } else {
-            for (id, task) in &todos {
-                let escaped = escape(task);
+            for (id, task, date) in &todos {
                 writeln!(
                     text,
-                    "• <a href=\"https://t.me/{}?start=done_{id}\">[{id}] {escaped}</a>",
-                    self.username
+                    "<a href=\"https://t.me/{}?start=done_{id}\">• [{id}] {}\t\t</a> \
+                    (<tg-time unix=\"{date}\" format=\"dT\">{date}</tg-time>, \
+                    <tg-time unix=\"{date}\" format=\"r\">{date}</tg-time>)",
+                    self.username,
+                    escape(task)
                 )?;
             }
         }
@@ -118,7 +120,7 @@ impl App {
                 && let Some(task) = db::get_todo(&self.conn, task_id)?
             {
                 println!("Completed task: {task_id}: {task}");
-                db::delete_todo(&self.conn, task_id)?;
+                db::delete_todo(&self.conn, task_id, message.date)?;
             } else {
                 eprintln!("Bad task ID: {task_id_str}");
             }
@@ -139,7 +141,7 @@ impl App {
                 let line = line.trim();
                 if !line.is_empty() {
                     println!("Adding todo: {line}");
-                    db::add_todo(&self.conn, line)?;
+                    db::add_todo(&self.conn, line, message.date)?;
                 }
             }
         }
