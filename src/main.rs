@@ -18,6 +18,7 @@ fn refresh_panel(
     bot: &Bot,
     chat_id: i64,
     username: &str,
+    #[allow(unused_variables)] reply_to_message_id: Option<i64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let todos = db::get_todos(conn)?;
 
@@ -35,25 +36,38 @@ fn refresh_panel(
         }
     }
 
-    if let Some(msg_id) = db::get_panel_id(conn)? {
-        // Try to edit the existing message
-        match bot.edit_message_text(chat_id, msg_id, &text, Some("HTML")) {
-            Ok(_) => return Ok(()),
-            Err(e) => {
-                if e.to_string()
-                    .to_ascii_lowercase()
-                    .contains("message is not modified")
-                {
-                    return Ok(());
+    #[cfg(feature = "edit_mode")]
+    {
+        if let Some(msg_id) = db::get_panel_id(conn)? {
+            match bot.edit_message_text(chat_id, msg_id, &text, Some("HTML")) {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    if e.to_string()
+                        .to_ascii_lowercase()
+                        .contains("message is not modified")
+                    {
+                        return Ok(());
+                    }
+                    eprintln!("Edit failed: {e}. Sending a new message instead.");
                 }
-                // Send new message if edit fails (deleted, expired, etc.)
-                eprintln!("Edit failed: {e}. Sending a new message instead.");
             }
         }
+        let msg = bot.send_message(chat_id, &text, Some("HTML"), None)?;
+        db::set_panel_id(conn, msg.id)?;
     }
 
-    let msg = bot.send_message(chat_id, &text, Some("HTML"))?;
-    db::set_panel_id(conn, msg.id)?;
+    #[cfg(not(feature = "edit_mode"))]
+    {
+        let msg = bot.send_message(chat_id, &text, Some("HTML"), reply_to_message_id)?;
+        let old_panel_id = db::get_panel_id(conn)?;
+        db::set_panel_id(conn, msg.id)?;
+
+        if let Some(msg_id) = old_panel_id
+            && let Err(e) = bot.delete_message(chat_id, msg_id)
+        {
+            eprintln!("Failed to delete old panel {msg_id}: {e}");
+        }
+    }
 
     Ok(())
 }
@@ -63,10 +77,21 @@ fn handle_update(
     bot: &Bot,
     update: &Update,
     username: &str,
+    allowed_chat_id: i64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(message) = &update.message else {
         return Ok(());
     };
+
+    let chat_id = message.chat.id;
+    if chat_id != allowed_chat_id {
+        eprintln!("Unauthorized update from {chat_id}:\n{update:#?}");
+        let debug_text = format!("{update:#?}");
+        let text = format!("Unauthorized update:\n<pre>{}</pre>", escape(&debug_text));
+        bot.send_message(allowed_chat_id, &text, Some("HTML"), None)?;
+        return Ok(());
+    }
+
     let Some(text) = &message.text else {
         return Ok(());
     };
@@ -76,9 +101,10 @@ fn handle_update(
         return Ok(());
     }
 
-    let chat_id = message.chat.id;
+    let mut should_delete = cfg!(feature = "edit_mode");
 
     if let Some(task_id_str) = text.strip_prefix("/start done_") {
+        should_delete = true;
         if let Ok(task_id) = task_id_str.parse::<i64>()
             && let Some(task) = db::get_todo(conn, task_id)?
         {
@@ -95,6 +121,7 @@ fn handle_update(
              You can send multiple tasks by separating them with newlines.\n\n\
              Each task will be shown with a link to complete/delete it.",
             None,
+            None,
         )?;
         return Ok(());
     } else {
@@ -108,34 +135,68 @@ fn handle_update(
         }
     }
 
-    refresh_panel(conn, bot, chat_id, username)?;
-    if let Err(e) = bot.delete_message(chat_id, message.id) {
-        eprintln!("Warning: Failed to delete user's message: {e}");
+    if should_delete {
+        refresh_panel(conn, bot, chat_id, username, None)?;
+        bot.delete_message(chat_id, message.id)?;
+    } else {
+        refresh_panel(conn, bot, chat_id, username, Some(message.id))?;
     }
     Ok(())
 }
 
+fn init(
+    conn: &Connection,
+    bot: &Bot,
+    chat_id: i64,
+    username: &str,
+) -> Result<Option<i64>, Box<dyn std::error::Error>> {
+    let offset;
+    let discarded;
+
+    if let Ok(updates) = bot.get_updates(Some(-1), 0)
+        && let Some(last) = updates.last()
+    {
+        let last_id: i64 = last.update_id;
+        discarded = updates.len();
+        for update in updates {
+            eprintln!("Discarded update: {update:#?}");
+        }
+        offset = Some(last_id + 1);
+        println!("Discarded accumulated updates up to id {last_id}");
+    } else {
+        discarded = 0;
+        offset = None;
+    }
+
+    let text = if discarded > 0 {
+        format!("{username} initialized! Discarded {discarded} updates.")
+    } else {
+        format!("{username} initialized!")
+    };
+
+    let msg = bot.send_message(chat_id, &text, None, None)?;
+    refresh_panel(conn, bot, chat_id, username, Some(msg.id))?;
+    Ok(offset)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let token = env::var("TELEGRAM_BOT_TOKEN")
-        .map_err(|_| "TELEGRAM_BOT_TOKEN environment variable not set")?;
-
-    // Connect to SQLite DB
+    let token = env::var("TELEGRAM_BOT_TOKEN")?;
+    let allowed_chat_id: i64 = env::var("ALLOWED_CHAT_ID")?.parse()?;
     let conn = Connection::open("todo.db")?;
-
-    // Initialize DB schemas
     db::init_db(&conn)?;
 
     let api_base = env::var("TELEGRAM_API_BASE_URL")
         .unwrap_or_else(|_| "https://api.telegram.org".to_string());
 
     let bot = Bot::new(&token, &api_base);
+    drop(api_base);
 
     // Fetch bot username for deep linking
     let me = bot.get_me()?;
     let username = me.username.ok_or("Bot does not have a username set")?;
     println!("Bot initialized as @{username}");
 
-    let mut offset: Option<i64> = None;
+    let mut offset = init(&conn, &bot, allowed_chat_id, &username)?;
     let mut retry_delay = Duration::from_secs(2);
     let max_delay = Duration::from_mins(5);
 
@@ -145,7 +206,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 retry_delay = Duration::from_secs(2);
                 for update in updates {
                     offset = Some(update.update_id + 1);
-                    if let Err(e) = handle_update(&conn, &bot, &update, &username) {
+                    if let Err(e) = handle_update(&conn, &bot, &update, &username, allowed_chat_id)
+                    {
                         eprintln!("Error handling update: {e}");
                     }
                 }

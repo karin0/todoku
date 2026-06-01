@@ -97,7 +97,14 @@ impl Bot {
         chat_id: i64,
         text: &str,
         parse_mode: Option<&str>,
+        reply_to_message_id: Option<i64>,
     ) -> Result<Message, Box<dyn std::error::Error>> {
+        #[derive(Serialize)]
+        struct ReplyParameters {
+            message_id: i64,
+            allow_sending_without_reply: bool,
+        }
+
         #[derive(Serialize)]
         struct SendMessage<'a> {
             chat_id: i64,
@@ -106,17 +113,26 @@ impl Bot {
             parse_mode: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
             disable_web_page_preview: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            reply_parameters: Option<ReplyParameters>,
         }
+
+        let reply_parameters = reply_to_message_id.map(|id| ReplyParameters {
+            message_id: id,
+            allow_sending_without_reply: true,
+        });
 
         let body = SendMessage {
             chat_id,
             text,
             parse_mode,
             disable_web_page_preview: Some(true),
+            reply_parameters,
         };
         self.request("sendMessage", &body)
     }
 
+    #[cfg(feature = "edit_mode")]
     pub fn edit_message_text(
         &self,
         chat_id: i64,
@@ -160,6 +176,11 @@ impl Bot {
             chat_id,
             message_id,
         };
-        self.request("deleteMessage", &body)
+        let result: bool = self.request("deleteMessage", &body)?;
+        if result {
+            Ok(())
+        } else {
+            Err("Unexpected `false` from deleteMessage".into())
+        }
     }
 }
