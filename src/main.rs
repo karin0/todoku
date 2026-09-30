@@ -2,10 +2,11 @@ mod bot;
 mod db;
 
 use anyhow::{Result, anyhow};
-use bot::{Bot, BotCommand, BotCommandScope, CallbackQuery, Message, Update};
+use bot::{Bot, BotCommand, BotCommandScope};
 use html_escape::encode_text;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
+use kuriero::{CallbackQuery, Message, Update};
 use rusqlite::Connection;
 use std::env;
 use std::fmt::Write;
@@ -71,16 +72,13 @@ impl App {
         if let Some(msg_id) = db::get_panel_id(&self.conn, topic)? {
             let text = self.render(topic)?;
             match self.bot.edit_rich_message(self.chat_id, msg_id, &text) {
-                Ok(_) => return Ok(()),
-                Err(e) => {
-                    if e.to_string()
-                        .to_ascii_lowercase()
-                        .contains("message is not modified")
-                    {
-                        return Ok(());
-                    }
-                    eprintln!("Edit failed: {e}. Sending a new panel instead.");
+                Ok(()) => return Ok(()),
+                Err(kuriero::Error::Rejected { description, .. })
+                    if description.contains("message is not modified") =>
+                {
+                    return Ok(());
                 }
+                Err(e) => eprintln!("Edit failed: {e}. Sending a new panel instead."),
             }
         }
         self.send_panel(topic, reply_to_message_id)
@@ -237,8 +235,8 @@ impl App {
         })
     }
 
-    fn init(&self) -> Result<Option<i64>> {
-        let updates = self.bot.get_updates(Some(-1), 0)?;
+    fn init(&self) -> Result<i64> {
+        let updates = self.bot.get_updates(-1, 0)?;
         let mention = &self.mention;
         let (total_todo, total_done) = db::stat(&self.conn)?;
 
@@ -249,12 +247,12 @@ impl App {
             for update in updates {
                 eprintln!("Discarded update: {update:#?}");
             }
-            offset = Some(last_id + 1);
+            offset = last_id + 1;
             format!(
                 "{mention} initialized: {total_todo} tasks, {total_done} done, {discarded} discarded, update_id={last_id}"
             )
         } else {
-            offset = None;
+            offset = 0;
             format!("{mention} initialized: {total_todo} tasks, {total_done} done")
         };
 
@@ -319,7 +317,7 @@ fn main() -> Result<()> {
             Ok(updates) => {
                 retry_delay = Duration::from_secs(2);
                 if let Some(last) = updates.last() {
-                    offset = Some(last.id + 1);
+                    offset = last.id + 1;
                     for update in updates {
                         if let Err(e) = app.handle_update(&update) {
                             eprintln!("Error handling update: {update:#?}: {e}");
