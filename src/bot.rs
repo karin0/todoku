@@ -47,9 +47,39 @@ impl Message {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct Update {
-    pub update_id: i64,
+pub struct CallbackQuery {
+    pub id: String,
+    /// Absent for a callback from a message the bot can no longer access.
     pub message: Option<Message>,
+    pub data: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Update {
+    #[serde(rename = "update_id")]
+    pub id: i64,
+    pub message: Option<Message>,
+    pub callback_query: Option<CallbackQuery>,
+}
+
+#[derive(Serialize)]
+struct InputRichMessage<'a> {
+    html: &'a str,
+}
+
+#[derive(Serialize)]
+struct ReplyParameters {
+    message_id: i64,
+    allow_sending_without_reply: bool,
+}
+
+impl ReplyParameters {
+    fn to(message_id: Option<i64>) -> Option<Self> {
+        message_id.map(|message_id| Self {
+            message_id,
+            allow_sending_without_reply: true,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,7 +167,7 @@ impl Bot {
         let body = GetUpdates {
             offset,
             timeout,
-            allowed_updates: &["message"],
+            allowed_updates: &["message", "callback_query"],
         };
         self.request("getUpdates", &body)
     }
@@ -150,12 +180,6 @@ impl Bot {
         parse_mode: Option<&str>,
         reply_to_message_id: Option<i64>,
     ) -> Result<Message> {
-        #[derive(Serialize)]
-        struct ReplyParameters {
-            message_id: i64,
-            allow_sending_without_reply: bool,
-        }
-
         #[derive(Serialize)]
         struct SendMessage<'a> {
             chat_id: i64,
@@ -175,40 +199,65 @@ impl Bot {
             text,
             parse_mode,
             disable_web_page_preview: true,
-            reply_parameters: reply_to_message_id.map(|message_id| ReplyParameters {
-                message_id,
-                allow_sending_without_reply: true,
-            }),
+            reply_parameters: ReplyParameters::to(reply_to_message_id),
         };
         self.request("sendMessage", &body)
     }
 
-    pub fn edit_message_text(
+    pub fn send_rich_message(
         &self,
         chat_id: i64,
-        message_id: i64,
-        text: &str,
-        parse_mode: Option<&str>,
+        topic: Option<i64>,
+        html: &str,
+        reply_to_message_id: Option<i64>,
     ) -> Result<Message> {
+        #[derive(Serialize)]
+        struct SendRichMessage<'a> {
+            chat_id: i64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            message_thread_id: Option<i64>,
+            rich_message: InputRichMessage<'a>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            reply_parameters: Option<ReplyParameters>,
+        }
+
+        let body = SendRichMessage {
+            chat_id,
+            message_thread_id: topic,
+            rich_message: InputRichMessage { html },
+            reply_parameters: ReplyParameters::to(reply_to_message_id),
+        };
+        self.request("sendRichMessage", &body)
+    }
+
+    pub fn edit_rich_message(&self, chat_id: i64, message_id: i64, html: &str) -> Result<Message> {
         #[derive(Serialize)]
         struct EditMessageText<'a> {
             chat_id: i64,
             message_id: i64,
-            text: &'a str,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            parse_mode: Option<&'a str>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            disable_web_page_preview: Option<bool>,
+            rich_message: InputRichMessage<'a>,
         }
 
         let body = EditMessageText {
             chat_id,
             message_id,
-            text,
-            parse_mode,
-            disable_web_page_preview: Some(true),
+            rich_message: InputRichMessage { html },
         };
         self.request("editMessageText", &body)
+    }
+
+    pub fn answer_callback_query(&self, callback_query_id: &str) -> Result<()> {
+        #[derive(Serialize)]
+        struct AnswerCallbackQuery<'a> {
+            callback_query_id: &'a str,
+        }
+
+        let body = AnswerCallbackQuery { callback_query_id };
+        if self.request("answerCallbackQuery", &body)? {
+            Ok(())
+        } else {
+            Err(anyhow!("Unexpected `false` from answerCallbackQuery"))
+        }
     }
 
     pub fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<()> {

@@ -65,25 +65,30 @@ pub fn stat(conn: &Connection) -> Result<(i64, i64)> {
     Ok((total_todo, total_done))
 }
 
-pub fn get_todo(conn: &Connection, task_id: i64, topic: Option<i64>) -> Result<Option<String>> {
-    conn.query_one(
-        "SELECT text FROM Todo WHERE id = ?1 AND topic = ?2;",
-        rusqlite::params![task_id, key(topic)],
-        |row| row.get(0),
-    )
-    .optional()
-}
-
-pub fn delete_todo(conn: &Connection, task_id: i64, done_at: i64) -> Result<()> {
+/// Moves a task to `Done`, returning its text and topic, or `None` for a task that is
+/// already gone.
+pub fn delete_todo(
+    conn: &Connection,
+    task_id: i64,
+    done_at: i64,
+) -> Result<Option<(String, Option<i64>)>> {
     let tx = conn.unchecked_transaction()?;
+    let Some((text, created_at, topic)): Option<(String, i64, i64)> = tx
+        .query_one(
+            "DELETE FROM Todo WHERE id = ?1 RETURNING text, created_at, topic;",
+            [task_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
     tx.execute(
-        "INSERT INTO Done (todo_id, text, created_at, done_at, topic)
-            SELECT id, text, created_at, ?2, topic FROM Todo WHERE id = ?1;",
-        [task_id, done_at],
+        "INSERT INTO Done (todo_id, text, created_at, done_at, topic) VALUES (?1, ?2, ?3, ?4, ?5);",
+        rusqlite::params![task_id, text, created_at, done_at, topic],
     )?;
-    tx.execute("DELETE FROM Todo WHERE id = ?1;", [task_id])?;
     tx.commit()?;
-    Ok(())
+    Ok(Some((text, topic_of(topic))))
 }
 
 pub fn get_panel_topics(conn: &Connection) -> Result<Vec<Option<i64>>> {
