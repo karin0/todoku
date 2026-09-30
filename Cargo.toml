@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 rusqlite = "0.40"
-kuriero = { git = "https://github.com/karin0/kuriero.git", rev = "52479d4ca935bee0b19a18277f51b12c4a018136", default-features = false }
+kuriero = { git = "https://github.com/karin0/kuriero.git", rev = "fe9770f84d6ab05a625660aed34578b982388b73", default-features = false }
 serde = { version = "1", features = ["derive"] }
 anyhow = { version = "1", features = ["backtrace"] }
 ctrlc = { version = "3", features = ["termination"] }
