@@ -74,7 +74,7 @@ impl App {
         Ok(())
     }
 
-    fn refresh_panel(&self, topic: Option<i64>, reply_to_message_id: Option<i64>) -> Result<()> {
+    fn refresh_panel(&self, topic: Option<i64>) -> Result<()> {
         if let Some(msg_id) = db::get_panel_id(&self.conn, topic)? {
             let text = self.render(topic)?;
             let edit = EditMessageText {
@@ -93,7 +93,7 @@ impl App {
                 Err(e) => eprintln!("Edit failed: {e}. Sending a new panel instead."),
             }
         }
-        self.send_panel(topic, reply_to_message_id)
+        self.send_panel(topic, None)
     }
 
     fn send_usage(&self, topic: Option<i64>, reply_to_message_id: Option<i64>) -> Result<()> {
@@ -152,7 +152,7 @@ impl App {
                 db::delete_todo(&self.conn, task_id, Timestamp::now().as_second())?
         {
             println!("Completed task: {task_id}: {task}");
-            self.refresh_panel(topic, None)?;
+            self.refresh_panel(topic)?;
         } else {
             eprintln!("Bad callback data: {data}");
         }
@@ -202,7 +202,7 @@ impl App {
             }
         }
 
-        self.refresh_panel(topic, reply_to)?;
+        self.refresh_panel(topic)?;
         self.client.send(&DeleteMessage {
             chat_id: self.chat_id,
             message_id: message.id,
@@ -285,7 +285,7 @@ impl App {
         println!("{info}");
         self.say(SendMessage::new(self.chat_id, None, &info))?;
         for topic in db::get_panel_topics(&self.conn)? {
-            self.refresh_panel(topic, None)?;
+            self.refresh_panel(topic)?;
         }
         Ok(offset)
     }
