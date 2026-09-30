@@ -31,6 +31,19 @@ pub struct Message {
     pub chat: Chat,
     pub text: Option<String>,
     pub date: i64,
+    #[serde(rename = "message_thread_id")]
+    thread_id: Option<i64>,
+    #[serde(rename = "is_topic_message", default)]
+    in_topic: bool,
+}
+
+impl Message {
+    /// The topic the message is in. `message_thread_id` also numbers the reply threads
+    /// of a group without topics, where nothing can be sent to one, so only a topic
+    /// message's counts.
+    pub fn topic(&self) -> Option<i64> {
+        self.thread_id.filter(|_| self.in_topic)
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -132,6 +145,7 @@ impl Bot {
     pub fn send_message(
         &self,
         chat_id: i64,
+        topic: Option<i64>,
         text: &str,
         parse_mode: Option<&str>,
         reply_to_message_id: Option<i64>,
@@ -145,6 +159,8 @@ impl Bot {
         #[derive(Serialize)]
         struct SendMessage<'a> {
             chat_id: i64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            message_thread_id: Option<i64>,
             text: &'a str,
             #[serde(skip_serializing_if = "Option::is_none")]
             parse_mode: Option<&'a str>,
@@ -155,6 +171,7 @@ impl Bot {
 
         let body = SendMessage {
             chat_id,
+            message_thread_id: topic,
             text,
             parse_mode,
             disable_web_page_preview: true,

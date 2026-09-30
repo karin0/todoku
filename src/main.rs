@@ -14,14 +14,14 @@ struct App {
     conn: Connection,
     bot: Bot,
     chat_id: i64,
-    username: String,
+    /// `@` and the bot's username, which a client appends to a command sent in a group.
+    mention: String,
 }
 
 impl App {
-    fn render(&self) -> Result<String> {
-        let todos = db::get_todos(&self.conn)?;
+    fn render(&self, topic: Option<i64>) -> Result<String> {
+        let todos = db::get_todos(&self.conn, topic)?;
 
-        // Build list with deep links
         let mut text = format!("<b>{} tasks:</b>\n", todos.len());
         if todos.is_empty() {
             text.push_str("All tasks completed! 🎉");
@@ -29,10 +29,9 @@ impl App {
             for (id, task, date) in todos {
                 writeln!(
                     text,
-                    "<a href=\"https://t.me/{}?start=done_{id}\">• [{id}] {}\t\t</a> \
+                    "• /done_{id} {} \
                     (<tg-time unix=\"{date}\" format=\"dT\">{date}</tg-time>, \
                     <tg-time unix=\"{date}\" format=\"r\">{date}</tg-time>)",
-                    self.username,
                     encode_text(&task),
                 )?;
             }
@@ -41,13 +40,17 @@ impl App {
         Ok(text)
     }
 
-    fn send_panel(&self, reply_to_message_id: Option<i64>) -> Result<()> {
-        let text = self.render()?;
-        let msg = self
-            .bot
-            .send_message(self.chat_id, &text, Some("HTML"), reply_to_message_id)?;
-        let old_panel_id = db::get_panel_id(&self.conn)?;
-        db::set_panel_id(&self.conn, msg.id)?;
+    fn send_panel(&self, topic: Option<i64>, reply_to_message_id: Option<i64>) -> Result<()> {
+        let text = self.render(topic)?;
+        let msg = self.bot.send_message(
+            self.chat_id,
+            topic,
+            &text,
+            Some("HTML"),
+            reply_to_message_id,
+        )?;
+        let old_panel_id = db::get_panel_id(&self.conn, topic)?;
+        db::set_panel_id(&self.conn, topic, msg.id)?;
 
         if let Some(msg_id) = old_panel_id
             && let Err(e) = self.bot.delete_message(self.chat_id, msg_id)
@@ -58,9 +61,9 @@ impl App {
         Ok(())
     }
 
-    fn refresh_panel(&self, reply_to_message_id: Option<i64>) -> Result<()> {
-        let text = self.render()?;
-        if let Some(msg_id) = db::get_panel_id(&self.conn)? {
+    fn refresh_panel(&self, topic: Option<i64>, reply_to_message_id: Option<i64>) -> Result<()> {
+        let text = self.render(topic)?;
+        if let Some(msg_id) = db::get_panel_id(&self.conn, topic)? {
             match self
                 .bot
                 .edit_message_text(self.chat_id, msg_id, &text, Some("HTML"))
@@ -77,21 +80,27 @@ impl App {
                 }
             }
         }
-        let msg = self
-            .bot
-            .send_message(self.chat_id, &text, Some("HTML"), reply_to_message_id)?;
-        db::set_panel_id(&self.conn, msg.id)?;
+        let msg = self.bot.send_message(
+            self.chat_id,
+            topic,
+            &text,
+            Some("HTML"),
+            reply_to_message_id,
+        )?;
+        db::set_panel_id(&self.conn, topic, msg.id)?;
 
         Ok(())
     }
 
-    fn send_usage(&self, reply_to_message_id: Option<i64>) -> Result<()> {
+    fn send_usage(&self, topic: Option<i64>, reply_to_message_id: Option<i64>) -> Result<()> {
         self.bot.send_message(
             self.chat_id,
+            topic,
             "Welcome to Todoku! 📝\n\n\
                     To add tasks to your todo list, simply type them here. \
                     You can send multiple tasks by separating them with newlines.\n\n\
-                    Each task will be shown with a link to complete/delete it.",
+                    Each task is shown with a /done command that completes it. \
+                    Each topic keeps its own list.",
             None,
             reply_to_message_id,
         )?;
@@ -111,7 +120,7 @@ impl App {
                 encode_text(&format!("{update:#?}"))
             );
             self.bot
-                .send_message(self.chat_id, &text, Some("HTML"), None)?;
+                .send_message(self.chat_id, None, &text, Some("HTML"), None)?;
             return Ok(());
         }
 
@@ -124,39 +133,45 @@ impl App {
             return Ok(());
         }
 
+        let topic = message.topic();
         let reply_to = Some(message.id);
+        let command = if text.starts_with('/') {
+            text.strip_suffix(self.mention.as_str()).unwrap_or(text)
+        } else {
+            text
+        };
 
-        if let Some(task_id_str) = text.strip_prefix("/start done_") {
+        if let Some(task_id_str) = command.strip_prefix("/done_") {
             if let Ok(task_id) = task_id_str.parse::<i64>()
-                && let Some(task) = db::get_todo(&self.conn, task_id)?
+                && let Some(task) = db::get_todo(&self.conn, task_id, topic)?
             {
                 println!("Completed task: {task_id}: {task}");
                 db::delete_todo(&self.conn, task_id, message.date)?;
             } else {
-                eprintln!("Bad task ID: {task_id_str}");
+                eprintln!("Bad task ID in topic {topic:?}: {task_id_str}");
             }
-        } else if text == "/start" {
-            if db::has_todos(&self.conn)? {
-                self.send_panel(reply_to)?;
+        } else if command == "/start" {
+            if db::has_todos(&self.conn, topic)? {
+                self.send_panel(topic, reply_to)?;
             } else {
-                self.send_usage(reply_to)?;
+                self.send_usage(topic, reply_to)?;
             }
             return Ok(());
-        } else if text == "/help" {
-            self.send_usage(reply_to)?;
+        } else if command == "/help" {
+            self.send_usage(topic, reply_to)?;
             return Ok(());
         } else {
             // Regular message: split into lines and add each non-empty line as a todo
             for line in text.lines() {
                 let line = line.trim();
                 if !line.is_empty() {
-                    println!("Adding todo: {line}");
-                    db::add_todo(&self.conn, line, message.date)?;
+                    println!("Adding todo in topic {topic:?}: {line}");
+                    db::add_todo(&self.conn, line, message.date, topic)?;
                 }
             }
         }
 
-        self.refresh_panel(reply_to)?;
+        self.refresh_panel(topic, reply_to)?;
         self.bot.delete_message(chat_id, message.id)?;
         Ok(())
     }
@@ -170,7 +185,6 @@ impl App {
         };
         let chat_id: i64 = env::var("ALLOWED_CHAT_ID")?.parse()?;
 
-        // Fetch bot username for deep linking
         let username = bot
             .get_me()?
             .username
@@ -200,13 +214,13 @@ impl App {
             conn,
             bot,
             chat_id,
-            username,
+            mention: format!("@{username}"),
         })
     }
 
     fn init(&self) -> Result<Option<i64>> {
         let updates = self.bot.get_updates(Some(-1), 0)?;
-        let username = &self.username;
+        let mention = &self.mention;
         let (total_todo, total_done) = db::stat(&self.conn)?;
 
         let offset;
@@ -218,16 +232,19 @@ impl App {
             }
             offset = Some(last_id + 1);
             format!(
-                "@{username} initialized: {total_todo} tasks, {total_done} done, {discarded} discarded, update_id={last_id}"
+                "{mention} initialized: {total_todo} tasks, {total_done} done, {discarded} discarded, update_id={last_id}"
             )
         } else {
             offset = None;
-            format!("@{username} initialized: {total_todo} tasks, {total_done} done")
+            format!("{mention} initialized: {total_todo} tasks, {total_done} done")
         };
 
         println!("{info}");
-        let msg = self.bot.send_message(self.chat_id, &info, None, None)?;
-        self.refresh_panel(Some(msg.id))?;
+        self.bot
+            .send_message(self.chat_id, None, &info, None, None)?;
+        for topic in db::get_panel_topics(&self.conn)? {
+            self.refresh_panel(topic, None)?;
+        }
         Ok(offset)
     }
 }
