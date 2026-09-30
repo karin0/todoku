@@ -2,8 +2,10 @@ mod bot;
 mod db;
 
 use anyhow::{Result, anyhow};
-use bot::{Bot, BotCommand, BotCommandScope, Update};
+use bot::{Bot, BotCommand, BotCommandScope, CallbackQuery, Message, Update};
 use html_escape::encode_text;
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
 use rusqlite::Connection;
 use std::env;
 use std::fmt::Write;
@@ -16,39 +18,43 @@ struct App {
     chat_id: i64,
     /// `@` and the bot's username, which a client appends to a command sent in a group.
     mention: String,
+    /// Where the fallback text of each task's time is written, for clients that show a
+    /// date-time entity in a rich message as that text.
+    tz: TimeZone,
 }
 
 impl App {
     fn render(&self, topic: Option<i64>) -> Result<String> {
         let todos = db::get_todos(&self.conn, topic)?;
 
-        let mut text = format!("<b>{} tasks:</b>\n", todos.len());
+        let mut text = format!("<h3>{} tasks</h3><p>", todos.len());
         if todos.is_empty() {
             text.push_str("All tasks completed! 🎉");
-        } else {
-            for (id, task, date) in todos {
-                writeln!(
-                    text,
-                    "• /done_{id} {} \
-                    (<tg-time unix=\"{date}\" format=\"dT\">{date}</tg-time>, \
-                    <tg-time unix=\"{date}\" format=\"r\">{date}</tg-time>)",
-                    encode_text(&task),
-                )?;
-            }
         }
+        for (i, (id, task, date)) in todos.into_iter().enumerate() {
+            if i > 0 {
+                text.push_str("<br>");
+            }
+            let local = Timestamp::from_second(date)?
+                .to_zoned(self.tz.clone())
+                .strftime("%m-%d %H:%M");
+            write!(
+                text,
+                "• <tg-button type=\"callback_data\" style=\"link\" data=\"done_{id}\">{}</tg-button> \
+                · <tg-time unix=\"{date}\" format=\"r\">{local}</tg-time>",
+                encode_text(&task),
+            )?;
+        }
+        text.push_str("</p>");
 
         Ok(text)
     }
 
     fn send_panel(&self, topic: Option<i64>, reply_to_message_id: Option<i64>) -> Result<()> {
         let text = self.render(topic)?;
-        let msg = self.bot.send_message(
-            self.chat_id,
-            topic,
-            &text,
-            Some("HTML"),
-            reply_to_message_id,
-        )?;
+        let msg = self
+            .bot
+            .send_rich_message(self.chat_id, topic, &text, reply_to_message_id)?;
         let old_panel_id = db::get_panel_id(&self.conn, topic)?;
         db::set_panel_id(&self.conn, topic, msg.id)?;
 
@@ -62,12 +68,9 @@ impl App {
     }
 
     fn refresh_panel(&self, topic: Option<i64>, reply_to_message_id: Option<i64>) -> Result<()> {
-        let text = self.render(topic)?;
         if let Some(msg_id) = db::get_panel_id(&self.conn, topic)? {
-            match self
-                .bot
-                .edit_message_text(self.chat_id, msg_id, &text, Some("HTML"))
-            {
+            let text = self.render(topic)?;
+            match self.bot.edit_rich_message(self.chat_id, msg_id, &text) {
                 Ok(_) => return Ok(()),
                 Err(e) => {
                     if e.to_string()
@@ -76,20 +79,11 @@ impl App {
                     {
                         return Ok(());
                     }
-                    eprintln!("Edit failed: {e}. Sending a new message instead.");
+                    eprintln!("Edit failed: {e}. Sending a new panel instead.");
                 }
             }
         }
-        let msg = self.bot.send_message(
-            self.chat_id,
-            topic,
-            &text,
-            Some("HTML"),
-            reply_to_message_id,
-        )?;
-        db::set_panel_id(&self.conn, topic, msg.id)?;
-
-        Ok(())
+        self.send_panel(topic, reply_to_message_id)
     }
 
     fn send_usage(&self, topic: Option<i64>, reply_to_message_id: Option<i64>) -> Result<()> {
@@ -99,31 +93,60 @@ impl App {
             "Welcome to Todoku! 📝\n\n\
                     To add tasks to your todo list, simply type them here. \
                     You can send multiple tasks by separating them with newlines.\n\n\
-                    Each task is shown with a /done command that completes it. \
-                    Each topic keeps its own list.",
+                    Tap a task to complete it. Each topic keeps its own list.",
             None,
             reply_to_message_id,
         )?;
         Ok(())
     }
 
+    fn report_unauthorized(&self, chat_id: i64, update: &Update) -> Result<()> {
+        eprintln!("Unauthorized update from {chat_id}:\n{update:#?}");
+        let text = format!(
+            "Unauthorized update:\n<pre>{}</pre>",
+            encode_text(&format!("{update:#?}"))
+        );
+        self.bot
+            .send_message(self.chat_id, None, &text, Some("HTML"), None)?;
+        Ok(())
+    }
+
     fn handle_update(&self, update: &Update) -> Result<()> {
-        let Some(message) = &update.message else {
-            return Ok(());
-        };
-
-        let chat_id = message.chat.id;
-        if chat_id != self.chat_id {
-            eprintln!("Unauthorized update from {chat_id}:\n{update:#?}");
-            let text = format!(
-                "Unauthorized update:\n<pre>{}</pre>",
-                encode_text(&format!("{update:#?}"))
-            );
-            self.bot
-                .send_message(self.chat_id, None, &text, Some("HTML"), None)?;
-            return Ok(());
+        if let Some(message) = &update.message {
+            if message.chat.id == self.chat_id {
+                self.handle_message(message)?;
+            } else {
+                self.report_unauthorized(message.chat.id, update)?;
+            }
         }
+        if let Some(query) = &update.callback_query {
+            match &query.message {
+                Some(message) if message.chat.id != self.chat_id => {
+                    self.report_unauthorized(message.chat.id, update)?;
+                }
+                Some(_) => self.handle_callback(query)?,
+                None => {}
+            }
+            self.bot.answer_callback_query(&query.id)?;
+        }
+        Ok(())
+    }
 
+    fn handle_callback(&self, query: &CallbackQuery) -> Result<()> {
+        let data = query.data.as_deref().unwrap_or_default();
+        if let Some(task_id) = data.strip_prefix("done_").and_then(|id| id.parse().ok())
+            && let Some((task, topic)) =
+                db::delete_todo(&self.conn, task_id, Timestamp::now().as_second())?
+        {
+            println!("Completed task: {task_id}: {task}");
+            self.refresh_panel(topic, None)?;
+        } else {
+            eprintln!("Bad callback data: {data}");
+        }
+        Ok(())
+    }
+
+    fn handle_message(&self, message: &Message) -> Result<()> {
         let Some(text) = &message.text else {
             return Ok(());
         };
@@ -141,38 +164,33 @@ impl App {
             text
         };
 
-        if let Some(task_id_str) = command.strip_prefix("/done_") {
-            if let Ok(task_id) = task_id_str.parse::<i64>()
-                && let Some(task) = db::get_todo(&self.conn, task_id, topic)?
-            {
-                println!("Completed task: {task_id}: {task}");
-                db::delete_todo(&self.conn, task_id, message.date)?;
-            } else {
-                eprintln!("Bad task ID in topic {topic:?}: {task_id_str}");
+        match command {
+            "/start" => {
+                if db::has_todos(&self.conn, topic)? {
+                    self.send_panel(topic, reply_to)?;
+                } else {
+                    self.send_usage(topic, reply_to)?;
+                }
+                return Ok(());
             }
-        } else if command == "/start" {
-            if db::has_todos(&self.conn, topic)? {
-                self.send_panel(topic, reply_to)?;
-            } else {
+            "/help" => {
                 self.send_usage(topic, reply_to)?;
+                return Ok(());
             }
-            return Ok(());
-        } else if command == "/help" {
-            self.send_usage(topic, reply_to)?;
-            return Ok(());
-        } else {
-            // Regular message: split into lines and add each non-empty line as a todo
-            for line in text.lines() {
-                let line = line.trim();
-                if !line.is_empty() {
-                    println!("Adding todo in topic {topic:?}: {line}");
-                    db::add_todo(&self.conn, line, message.date, topic)?;
+            _ => {
+                // Regular message: split into lines and add each non-empty line as a todo
+                for line in text.lines() {
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        println!("Adding todo in topic {topic:?}: {line}");
+                        db::add_todo(&self.conn, line, message.date, topic)?;
+                    }
                 }
             }
         }
 
         self.refresh_panel(topic, reply_to)?;
-        self.bot.delete_message(chat_id, message.id)?;
+        self.bot.delete_message(self.chat_id, message.id)?;
         Ok(())
     }
 
@@ -215,6 +233,7 @@ impl App {
             bot,
             chat_id,
             mention: format!("@{username}"),
+            tz: TimeZone::system(),
         })
     }
 
@@ -225,7 +244,7 @@ impl App {
 
         let offset;
         let info = if let Some(last) = updates.last() {
-            let last_id: i64 = last.update_id;
+            let last_id: i64 = last.id;
             let discarded = updates.len();
             for update in updates {
                 eprintln!("Discarded update: {update:#?}");
@@ -300,7 +319,7 @@ fn main() -> Result<()> {
             Ok(updates) => {
                 retry_delay = Duration::from_secs(2);
                 if let Some(last) = updates.last() {
-                    offset = Some(last.update_id + 1);
+                    offset = Some(last.id + 1);
                     for update in updates {
                         if let Err(e) = app.handle_update(&update) {
                             eprintln!("Error handling update: {update:#?}: {e}");
