@@ -1,12 +1,14 @@
-mod bot;
 mod db;
 
 use anyhow::{Result, anyhow};
-use bot::{Bot, BotCommand, BotCommandScope};
 use html_escape::encode_text;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
-use kuriero::{CallbackQuery, Message, Update};
+use kuriero::{
+    AnswerCallbackQuery, BotCommand, CallbackQuery, Client, CommandScope, Content, DeleteMessage,
+    EditMessageText, GetMe, LinkPreviewOptions, Message, ParseMode, ReplyParameters, RichInput,
+    SendMessage, SendRichMessage, SetMyCommands, Update,
+};
 use rusqlite::Connection;
 use std::env;
 use std::fmt::Write;
@@ -15,7 +17,7 @@ use std::time::Duration;
 
 struct App {
     conn: Connection,
-    bot: Bot,
+    client: Client,
     chat_id: i64,
     /// `@` and the bot's username, which a client appends to a command sent in a group.
     mention: String,
@@ -53,14 +55,18 @@ impl App {
 
     fn send_panel(&self, topic: Option<i64>, reply_to_message_id: Option<i64>) -> Result<()> {
         let text = self.render(topic)?;
-        let msg = self
-            .bot
-            .send_rich_message(self.chat_id, topic, &text, reply_to_message_id)?;
+        let msg = self.client.send(&SendRichMessage {
+            reply_parameters: replying(reply_to_message_id),
+            ..SendRichMessage::new(self.chat_id, topic, RichInput::Html(&text))
+        })?;
         let old_panel_id = db::get_panel_id(&self.conn, topic)?;
         db::set_panel_id(&self.conn, topic, msg.id)?;
 
         if let Some(msg_id) = old_panel_id
-            && let Err(e) = self.bot.delete_message(self.chat_id, msg_id)
+            && let Err(e) = self.client.send(&DeleteMessage {
+                chat_id: self.chat_id,
+                message_id: msg_id,
+            })
         {
             eprintln!("Failed to delete old panel {msg_id}: {e}");
         }
@@ -71,8 +77,14 @@ impl App {
     fn refresh_panel(&self, topic: Option<i64>, reply_to_message_id: Option<i64>) -> Result<()> {
         if let Some(msg_id) = db::get_panel_id(&self.conn, topic)? {
             let text = self.render(topic)?;
-            match self.bot.edit_rich_message(self.chat_id, msg_id, &text) {
-                Ok(()) => return Ok(()),
+            let edit = EditMessageText {
+                chat_id: self.chat_id,
+                message_id: msg_id,
+                content: Content::Rich(RichInput::Html(&text)),
+                reply_markup: None,
+            };
+            match self.client.send(&edit) {
+                Ok(_) => return Ok(()),
                 Err(kuriero::Error::Rejected { description, .. })
                     if description.contains("message is not modified") =>
                 {
@@ -85,17 +97,17 @@ impl App {
     }
 
     fn send_usage(&self, topic: Option<i64>, reply_to_message_id: Option<i64>) -> Result<()> {
-        self.bot.send_message(
-            self.chat_id,
-            topic,
-            "Welcome to Todoku! 📝\n\n\
+        self.say(SendMessage {
+            reply_parameters: replying(reply_to_message_id),
+            ..SendMessage::new(
+                self.chat_id,
+                topic,
+                "Welcome to Todoku! 📝\n\n\
                     To add tasks to your todo list, simply type them here. \
                     You can send multiple tasks by separating them with newlines.\n\n\
                     Tap a task to complete it. Each topic keeps its own list.",
-            None,
-            reply_to_message_id,
-        )?;
-        Ok(())
+            )
+        })
     }
 
     fn report_unauthorized(&self, chat_id: i64, update: &Update) -> Result<()> {
@@ -104,9 +116,10 @@ impl App {
             "Unauthorized update:\n<pre>{}</pre>",
             encode_text(&format!("{update:#?}"))
         );
-        self.bot
-            .send_message(self.chat_id, None, &text, Some("HTML"), None)?;
-        Ok(())
+        self.say(SendMessage {
+            parse_mode: Some(ParseMode::Html),
+            ..SendMessage::new(self.chat_id, None, &text)
+        })
     }
 
     fn handle_update(&self, update: &Update) -> Result<()> {
@@ -125,7 +138,9 @@ impl App {
                 Some(_) => self.handle_callback(query)?,
                 None => {}
             }
-            self.bot.answer_callback_query(&query.id)?;
+            self.client.send(&AnswerCallbackQuery {
+                callback_query_id: &query.id,
+            })?;
         }
         Ok(())
     }
@@ -188,21 +203,32 @@ impl App {
         }
 
         self.refresh_panel(topic, reply_to)?;
-        self.bot.delete_message(self.chat_id, message.id)?;
+        self.client.send(&DeleteMessage {
+            chat_id: self.chat_id,
+            message_id: message.id,
+        })?;
+        Ok(())
+    }
+
+    fn say(&self, message: SendMessage<'_>) -> Result<()> {
+        self.client.send(&SendMessage {
+            link_preview_options: Some(LinkPreviewOptions { is_disabled: true }),
+            ..message
+        })?;
         Ok(())
     }
 
     fn new() -> Result<Self> {
-        let bot = {
+        let client = {
             let token = env::var("TELEGRAM_BOT_TOKEN")?;
             let base_url = env::var("TELEGRAM_API_BASE_URL");
             let base_url = base_url.as_deref().unwrap_or("https://api.telegram.org");
-            Bot::new(&token, base_url)
+            Client::new(base_url, &token)
         };
         let chat_id: i64 = env::var("ALLOWED_CHAT_ID")?.parse()?;
 
-        let username = bot
-            .get_me()?
+        let username = client
+            .send(&GetMe)?
             .username
             .ok_or_else(|| anyhow!("No username"))?;
 
@@ -212,8 +238,8 @@ impl App {
         db::init_db(&conn)?;
 
         // Register commands for the allowed chat
-        bot.set_commands(
-            &[
+        client.send(&SetMyCommands {
+            commands: &[
                 BotCommand {
                     command: "start",
                     description: "Start!",
@@ -223,12 +249,12 @@ impl App {
                     description: "Show usage",
                 },
             ],
-            Some(&BotCommandScope::Chat { chat_id }),
-        )?;
+            scope: CommandScope::Chat { chat_id },
+        })?;
 
         Ok(Self {
             conn,
-            bot,
+            client,
             chat_id,
             mention: format!("@{username}"),
             tz: TimeZone::system(),
@@ -236,7 +262,7 @@ impl App {
     }
 
     fn init(&self) -> Result<i64> {
-        let updates = self.bot.get_updates(-1, 0)?;
+        let updates = self.client.get_updates(-1, 0, false)?;
         let mention = &self.mention;
         let (total_todo, total_done) = db::stat(&self.conn)?;
 
@@ -257,13 +283,19 @@ impl App {
         };
 
         println!("{info}");
-        self.bot
-            .send_message(self.chat_id, None, &info, None, None)?;
+        self.say(SendMessage::new(self.chat_id, None, &info))?;
         for topic in db::get_panel_topics(&self.conn)? {
             self.refresh_panel(topic, None)?;
         }
         Ok(offset)
     }
+}
+
+fn replying(message_id: Option<i64>) -> Option<ReplyParameters> {
+    message_id.map(|message_id| ReplyParameters {
+        message_id,
+        allow_sending_without_reply: true,
+    })
 }
 
 #[cfg(unix)]
@@ -313,7 +345,7 @@ fn main() -> Result<()> {
     let max_delay = Duration::from_mins(5);
 
     while RUNNING.load(Ordering::Relaxed) {
-        match app.bot.get_updates(offset, 30) {
+        match app.client.get_updates(offset, 30, false) {
             Ok(updates) => {
                 retry_delay = Duration::from_secs(2);
                 if let Some(last) = updates.last() {
