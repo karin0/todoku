@@ -1,43 +1,62 @@
 use rusqlite::{Connection, OptionalExtension, Result};
 
+/// Telegram numbers a topic by the message that opened it, so 0 names the part of the
+/// chat outside every topic.
+fn key(topic: Option<i64>) -> i64 {
+    topic.unwrap_or(0)
+}
+
+fn topic_of(key: i64) -> Option<i64> {
+    (key != 0).then_some(key)
+}
+
 pub fn init_db(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS Todo (
             id         INTEGER PRIMARY KEY NOT NULL,
             text       TEXT NOT NULL,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            topic      INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS Done (
             id         INTEGER PRIMARY KEY NOT NULL,
             todo_id    INTEGER NOT NULL,
             text       TEXT NOT NULL,
             created_at INTEGER NOT NULL,
-            done_at    INTEGER NOT NULL
+            done_at    INTEGER NOT NULL,
+            topic      INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS Panel (
-            id         INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+            topic      INTEGER PRIMARY KEY NOT NULL,
             message_id INTEGER NOT NULL
         );",
     )?;
     Ok(())
 }
 
-pub fn add_todo(conn: &Connection, text: &str, created_at: i64) -> Result<()> {
+pub fn add_todo(conn: &Connection, text: &str, created_at: i64, topic: Option<i64>) -> Result<()> {
     conn.execute(
-        "INSERT INTO Todo (text, created_at) VALUES (?1, ?2);",
-        rusqlite::params![text, created_at],
+        "INSERT INTO Todo (text, created_at, topic) VALUES (?1, ?2, ?3);",
+        rusqlite::params![text, created_at, key(topic)],
     )?;
     Ok(())
 }
 
-pub fn has_todos(conn: &Connection) -> Result<bool> {
-    conn.query_one("SELECT EXISTS (SELECT 1 FROM Todo);", [], |row| row.get(0))
+pub fn has_todos(conn: &Connection, topic: Option<i64>) -> Result<bool> {
+    conn.query_one(
+        "SELECT EXISTS (SELECT 1 FROM Todo WHERE topic = ?1);",
+        [key(topic)],
+        |row| row.get(0),
+    )
 }
 
-pub fn get_todos(conn: &Connection) -> Result<Vec<(i64, String, i64)>> {
-    let mut stmt = conn.prepare("SELECT id, text, created_at FROM Todo ORDER BY id;")?;
-    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-        .collect()
+pub fn get_todos(conn: &Connection, topic: Option<i64>) -> Result<Vec<(i64, String, i64)>> {
+    let mut stmt =
+        conn.prepare("SELECT id, text, created_at FROM Todo WHERE topic = ?1 ORDER BY id;")?;
+    stmt.query_map([key(topic)], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })?
+    .collect()
 }
 
 pub fn stat(conn: &Connection) -> Result<(i64, i64)> {
@@ -46,42 +65,46 @@ pub fn stat(conn: &Connection) -> Result<(i64, i64)> {
     Ok((total_todo, total_done))
 }
 
-pub fn get_todo(conn: &Connection, task_id: i64) -> Result<Option<String>> {
-    conn.query_one("SELECT text FROM Todo WHERE id = ?1;", [task_id], |row| {
-        row.get(0)
-    })
+pub fn get_todo(conn: &Connection, task_id: i64, topic: Option<i64>) -> Result<Option<String>> {
+    conn.query_one(
+        "SELECT text FROM Todo WHERE id = ?1 AND topic = ?2;",
+        rusqlite::params![task_id, key(topic)],
+        |row| row.get(0),
+    )
     .optional()
 }
 
 pub fn delete_todo(conn: &Connection, task_id: i64, done_at: i64) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-
-    let (text, created_at): (String, i64) = tx.query_one(
-        "SELECT text, created_at FROM Todo WHERE id = ?1;",
-        [task_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
     tx.execute(
-        "INSERT INTO Done (todo_id, text, created_at, done_at) VALUES (?1, ?2, ?3, ?4);",
-        rusqlite::params![task_id, text, created_at, done_at],
+        "INSERT INTO Done (todo_id, text, created_at, done_at, topic)
+            SELECT id, text, created_at, ?2, topic FROM Todo WHERE id = ?1;",
+        [task_id, done_at],
     )?;
     tx.execute("DELETE FROM Todo WHERE id = ?1;", [task_id])?;
-
     tx.commit()?;
     Ok(())
 }
 
-pub fn get_panel_id(conn: &Connection) -> Result<Option<i64>> {
-    conn.query_one("SELECT message_id FROM Panel WHERE id = 1;", [], |row| {
-        row.get(0)
-    })
+pub fn get_panel_topics(conn: &Connection) -> Result<Vec<Option<i64>>> {
+    let mut stmt = conn.prepare("SELECT topic FROM Panel ORDER BY topic;")?;
+    stmt.query_map([], |row| row.get(0).map(topic_of))?
+        .collect()
+}
+
+pub fn get_panel_id(conn: &Connection, topic: Option<i64>) -> Result<Option<i64>> {
+    conn.query_one(
+        "SELECT message_id FROM Panel WHERE topic = ?1;",
+        [key(topic)],
+        |row| row.get(0),
+    )
     .optional()
 }
 
-pub fn set_panel_id(conn: &Connection, msg_id: i64) -> Result<()> {
+pub fn set_panel_id(conn: &Connection, topic: Option<i64>, msg_id: i64) -> Result<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO Panel (id, message_id) VALUES (1, ?1);",
-        [msg_id],
+        "INSERT OR REPLACE INTO Panel (topic, message_id) VALUES (?1, ?2);",
+        [key(topic), msg_id],
     )?;
     Ok(())
 }
