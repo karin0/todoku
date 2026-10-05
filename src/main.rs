@@ -44,7 +44,7 @@ impl App {
             write!(
                 text,
                 "• <tg-button type=\"callback_data\" style=\"link\" data=\"done_{id}\">{}</tg-button> \
-                · <tg-time unix=\"{date}\" format=\"r\">{local}</tg-time>",
+                · <tg-time unix=\"{date}\" format=\"dt\">{local}</tg-time>",
                 encode_text(&task),
             )?;
         }
