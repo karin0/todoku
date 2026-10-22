@@ -20,3 +20,9 @@ codegen-units = 1
 [features]
 default = ["tls"]
 tls = ["kuriero/rustls"]
+
+[lints.rust]
+warnings = 'deny'
+
+[lints.clippy]
+pedantic = { level = 'warn', priority = -1 }
