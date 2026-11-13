@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rusqlite = "0.40"
+rusqlite = "0.42"
 kuriero = { git = "https://github.com/karin0/kuriero.git", branch = "main", default-features = false }
 serde = { version = "1", features = ["derive"] }
 anyhow = { version = "1", features = ["backtrace"] }
