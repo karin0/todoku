@@ -68,7 +68,7 @@ impl App {
                 message_id: msg_id,
             })
         {
-            eprintln!("Failed to delete old panel {msg_id}: {e}");
+            log::warn!("Failed to delete old panel {msg_id}: {e}");
         }
 
         Ok(())
@@ -90,7 +90,7 @@ impl App {
                 {
                     return Ok(());
                 }
-                Err(e) => eprintln!("Edit failed: {e}. Sending a new panel instead."),
+                Err(e) => log::warn!("Edit failed: {e}. Sending a new panel instead."),
             }
         }
         self.send_panel(topic, None)
@@ -111,7 +111,7 @@ impl App {
     }
 
     fn report_unauthorized(&self, chat_id: i64, update: &Update) -> Result<()> {
-        eprintln!("Unauthorized update from {chat_id}:\n{update:#?}");
+        log::warn!("Unauthorized update from {chat_id}:\n{update:#?}");
         let text = format!(
             "Unauthorized update:\n<pre>{}</pre>",
             encode_text(&format!("{update:#?}"))
@@ -151,10 +151,10 @@ impl App {
             && let Some((task, topic)) =
                 db::delete_todo(&self.conn, task_id, Timestamp::now().as_second())?
         {
-            println!("Completed task: {task_id}: {task}");
+            log::info!("Completed task: {task_id}: {task}");
             self.refresh_panel(topic)?;
         } else {
-            eprintln!("Bad callback data: {data}");
+            log::warn!("Bad callback data: {data}");
         }
         Ok(())
     }
@@ -195,7 +195,7 @@ impl App {
                 for line in text.lines() {
                     let line = line.trim();
                     if !line.is_empty() {
-                        println!("Adding todo in topic {topic:?}: {line}");
+                        log::info!("Adding todo in topic {topic:?}: {line}");
                         db::add_todo(&self.conn, line, message.date, topic)?;
                     }
                 }
@@ -262,7 +262,7 @@ impl App {
     }
 
     fn init(&self) -> Result<i64> {
-        let updates = self.client.get_updates(-1, 0, false)?;
+        let updates = self.client.get_updates(-1, 0)?;
         let mention = &self.mention;
         let (total_todo, total_done) = db::stat(&self.conn)?;
 
@@ -271,7 +271,7 @@ impl App {
             let last_id: i64 = last.id;
             let discarded = updates.len();
             for update in updates {
-                eprintln!("Discarded update: {update:#?}");
+                log::info!("Discarded update: {update:#?}");
             }
             offset = last_id + 1;
             format!(
@@ -282,7 +282,7 @@ impl App {
             format!("{mention} initialized: {total_todo} tasks, {total_done} done")
         };
 
-        println!("{info}");
+        log::info!("{info}");
         self.say(SendMessage::new(self.chat_id, None, &info))?;
         for topic in db::get_panel_topics(&self.conn)? {
             self.refresh_panel(topic)?;
@@ -298,45 +298,16 @@ fn replying(message_id: Option<i64>) -> Option<ReplyParameters> {
     })
 }
 
-#[cfg(unix)]
-fn shutdown_all() {
-    use std::fs;
-    use std::os::{fd::RawFd, raw::c_int};
-
-    unsafe extern "C" {
-        fn shutdown(socket: RawFd, how: c_int) -> c_int;
-    }
-
-    match fs::read_dir("/proc/self/fd") {
-        Ok(entries) => {
-            for entry in entries.flatten() {
-                if let Some(fd_str) = entry.file_name().to_str()
-                    && let Ok(fd) = fd_str.parse::<RawFd>()
-                    && fd > 2
-                    && unsafe { shutdown(fd, 2) } == 0
-                {
-                    // Skip stdio to avoid breaking systemd journal sockets
-                    println!("Shutdown fd: {fd}");
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("Failed to read procfs: {e}");
-        }
-    }
-}
-
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
 fn main() -> Result<()> {
+    krr_logger::init!()?;
     ctrlc::set_handler(move || {
         if !RUNNING.swap(false, Ordering::Relaxed) {
-            eprintln!("Aborting.");
+            log::info!("Aborting.");
             std::process::exit(1);
         }
-        eprintln!("Exiting...");
-        #[cfg(unix)]
-        shutdown_all();
+        log::info!("Exiting...");
     })?;
 
     let app = App::new()?;
@@ -345,20 +316,20 @@ fn main() -> Result<()> {
     let max_delay = Duration::from_mins(5);
 
     while RUNNING.load(Ordering::Relaxed) {
-        match app.client.get_updates(offset, 30, false) {
+        match app.client.get_updates(offset, 30) {
             Ok(updates) => {
                 retry_delay = Duration::from_secs(2);
                 if let Some(last) = updates.last() {
                     offset = last.id + 1;
                     for update in updates {
                         if let Err(e) = app.handle_update(&update) {
-                            eprintln!("Error handling update: {update:#?}: {e}");
+                            log::error!("Error handling update: {update:#?}: {e}");
                         }
                     }
                 }
             }
             Err(e) => {
-                eprintln!("Error during polling: {e}. Retrying in {retry_delay:?}...");
+                log::error!("Error during polling: {e}. Retrying in {retry_delay:?}...");
                 if !RUNNING.load(Ordering::Relaxed) {
                     break;
                 }
@@ -367,6 +338,6 @@ fn main() -> Result<()> {
             }
         }
     }
-    println!("Shutting down.");
+    log::info!("Shutting down.");
     Ok(())
 }
